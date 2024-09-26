@@ -9,9 +9,6 @@ local function find_gradlew(directory)
 	end
 	local parent = vim.fn.fnamemodify(cwd, ":h")
 
-	print(cwd)
-	print(parent)
-
 	local handle = io.popen('find "' .. cwd .. '" -name "gradlew"')
 	if handle == nil then
 		return nil
@@ -74,7 +71,7 @@ local function clean()
 	end
 
 	vim.system(
-		{ gradlew, "clean" },
+		{ gradlew.gradlew, "clean" },
 		{ text = true },
 		vim.schedule_wrap(function(obj)
 			if obj.code == 0 then
@@ -91,6 +88,7 @@ local function get_adb_devices(adb)
 	local handle = io.popen(adb .. " devices")
 	if handle ~= nil then
 		local read = handle:read("*a")
+		handle:close()
 		local rows = {}
 		for row in string.gmatch(read, "[^\n]+") do
 			table.insert(rows, row)
@@ -115,6 +113,7 @@ local function get_device_names(adb, ids)
 		local handle = io.popen(adb .. " -s " .. id .. " emu avd name")
 		if handle ~= nil then
 			local read = handle:read("*a")
+			handle:close()
 			for row in string.gmatch(read, "[^\n]+") do
 				table.insert(devices, row)
 				break
@@ -172,6 +171,7 @@ local function find_main_activity(adb, application_id)
 	end
 
 	local read = handle:read("*a")
+	handle:close()
 
 	local result = nil
 	for line in read:gmatch("[^\r\n]+") do
@@ -203,12 +203,18 @@ local function build_and_install(root_dir, gradle, adb, device)
 	-- Installing
 	vim.notify("Installing...", vim.log.levels.INFO, {})
 
-	local installation_command = adb .. " -s " .. device.id .. " install " .. root_dir .. "/app/build/outputs/apk/debug/app-debug.apk"
+	local installation_command = adb
+		.. " -s "
+		.. device.id
+		.. " install "
+		.. root_dir
+		.. "/app/build/outputs/apk/debug/app-debug.apk"
 	local handle = io.popen(installation_command)
 	if handle == nil then
 		vim.notify("Installation failed.", vim.log.levels.ERROR, {})
 		return
 	end
+	handle:close()
 
 	-- Launch the app
 	vim.notify("Launching...", vim.log.levels.INFO, {})
@@ -225,12 +231,17 @@ local function build_and_install(root_dir, gradle, adb, device)
 		return
 	end
 
-	local launch_command = adb .. " -s " .. device.id .. " shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n " .. main_activity
+	local launch_command = adb
+		.. " -s "
+		.. device.id
+		.. " shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "
+		.. main_activity
 	local launch_handle = io.popen(launch_command)
 	if launch_handle == nil then
 		vim.notify("Failed to launch application.", vim.log.levels.ERROR, {})
 		return
 	end
+	launch_handle:close()
 
 	vim.notify("Successfully built and launched the application!", vim.log.levels.INFO, {})
 end
@@ -269,6 +280,42 @@ local function build_and_run()
 	end)
 end
 
+local function launch_avd()
+	local android_sdk = vim.env.ANDROID_HOME or vim.g.android_sdk
+	local emulator = vim.fn.expand(vim.fn.expand(android_sdk .. "/emulator/emulator"))
+
+	local handle = io.popen(emulator .. " -list-avds")
+	if handle == nil then
+		vim.notify("Cannot read emulators", vim.log.levels.WARN, {})
+		return
+	end
+	local read = handle:read("*a")
+	handle:close()
+
+	local avds = {}
+	for line in read:gmatch("[^\r\n]+") do
+		print(line)
+		table.insert(avds, line)
+	end
+	table.remove(avds, 1)
+
+	print(avds)
+
+	vim.ui.select(avds, {
+		prompt = "AVD to start",
+	}, function(choice)
+		if choice then
+			vim.notify("Device selected: " .. choice .. ". Launching!", vim.log.levels.INFO, {})
+			local obj = vim.system({ emulator, "@" .. choice }, { text = true }):wait()
+			if obj.code ~= 0 then
+				vim.notify("Launch failed: " .. obj.stderr, vim.log.levels.WARN, {})
+			end
+		else
+			vim.notify("Launch cancelled.", vim.log.levels.WARN, {})
+		end
+	end)
+end
+
 local function setup()
 	vim.api.nvim_create_user_command("AndroidBuildRelease", function()
 		build_release()
@@ -281,11 +328,16 @@ local function setup()
 	vim.api.nvim_create_user_command("Clean", function()
 		clean()
 	end, {})
+
+	vim.api.nvim_create_user_command("LaunchAvd", function()
+		launch_avd()
+	end, {})
 end
 
 return {
 	setup = setup,
 	build_release = build_release,
 	build_and_run = build_and_run,
+	launch_avd = launch_avd,
 	clean = clean,
 }
