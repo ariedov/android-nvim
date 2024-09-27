@@ -9,13 +9,8 @@ local function find_gradlew(directory)
 	end
 	local parent = vim.fn.fnamemodify(cwd, ":h")
 
-	local handle = io.popen('find "' .. cwd .. '" -name "gradlew"')
-	if handle == nil then
-		return nil
-	end
-
-	local result = handle:read("*a")
-	handle:close()
+	local obj = vim.system({'find', cwd, "-maxdepth", "1", "-name", "gradlew"}, {}):wait()
+	local result = obj.stdout
 
 	if result == nil or #result == 0 then
 		if cwd == parent then
@@ -26,6 +21,7 @@ local function find_gradlew(directory)
 		-- recursive call
 		return find_gradlew(parent)
 	end
+
 	return { cwd = cwd, gradlew = trim(result) }
 end
 
@@ -110,10 +106,8 @@ local function get_device_names(adb, ids)
 		local obj = vim.system({adb, "-s", id, "emu", "avd", "name"}, {}):wait()
 		if obj.code == 0 then
 			local read = obj.stdout or ""
-			for row in string.gmatch(read, "[^\n]+") do
-				table.insert(devices, row)
-				break
-			end
+			local device_name = read:match('^(.-)\n') or read
+			table.insert(devices, device_name)
 		end
 	end
 	return devices
@@ -125,6 +119,8 @@ local function get_running_devices(adb)
 	local adb_devices = get_adb_devices(adb)
 	local device_names = get_device_names(adb, adb_devices)
 
+	print(#adb_devices)
+	print(#device_names)
 	for i = 1, #adb_devices do
 		table.insert(devices, {
 			id = trim(adb_devices[i]),
@@ -160,8 +156,8 @@ local function find_application_id(root_dir)
 	return nil
 end
 
-local function find_main_activity(adb, application_id)
-	local obj = vim.system({adb, "shell", "cmd", "package", "resolve-activity", "--brief", application_id}, {}):wait()
+local function find_main_activity(adb, device_id, application_id)
+	local obj = vim.system({adb, "-s", device_id, "shell", "cmd", "package", "resolve-activity", "--brief", application_id}, {}):wait()
 	if obj.code ~= 0 then
 		return nil
 	end
@@ -214,7 +210,7 @@ local function build_and_install(root_dir, gradle, adb, device)
 			return
 		end
 
-		local main_activity = find_main_activity(adb, application_id)
+		local main_activity = find_main_activity(adb, device.id, application_id)
 		if main_activity == nil then
 			vim.notify("Failed to launch application, did not find main activity", vim.log.levels.ERROR, {})
 			return
@@ -249,6 +245,8 @@ local function build_and_run()
 		vim.notify("Build failed: no devices are running.", vim.log.levels.WARN, {})
 		return
 	end
+
+	print(running_devices[1].name)
 	vim.ui.select(running_devices, {
 		prompt = "Select device to run on",
 		format_item = function(item)
@@ -277,23 +275,20 @@ local function launch_avd()
 	local read = avds_obj.stdout or ""
 	local avds = {}
 	for line in read:gmatch("[^\r\n]+") do
-		print(line)
 		table.insert(avds, line)
 	end
 	table.remove(avds, 1)
-
-	print(avds)
 
 	vim.ui.select(avds, {
 		prompt = "AVD to start",
 	}, function(choice)
 		if choice then
 			vim.notify("Device selected: " .. choice .. ". Launching!", vim.log.levels.INFO, {})
-			vim.system({ emulator, "@" .. choice }, { text = true }, function(obj)
+			vim.system({ emulator, "@" .. choice }, { text = true }, vim.schedule_wrap(function(obj)
 				if obj.code ~= 0 then
 					vim.notify("Launch failed: " .. obj.stderr, vim.log.levels.WARN, {})
 				end
-			end)
+			end))
 		else
 			vim.notify("Launch cancelled.", vim.log.levels.WARN, {})
 		end
