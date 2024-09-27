@@ -4,6 +4,21 @@ This plugin was created as an effort for me to able to work on multiple differen
 
 At the moment this plugin is under heavy development and only has features that I personally needed at the moment, but feel free to expand on it, experiment and break it. It is my first attempt at something like this, but I hope it can be useful.
 
+#### Installation
+
+**With `lazy.nvim`**
+
+```lua
+{
+    "ariedov/android-nvim",
+    config = function()
+      -- OPTIONAL: specify android sdk directory
+      -- vim.g.android_sdk = "~/Library/Android/sdk"
+      require('android-nvim').setup()
+    end
+}
+```
+
 ![Select device to run the application on](screenshots/select_device_to_run.png)
 
 ![Select AVD to start](screenshots/select_avd.png)
