@@ -269,10 +269,13 @@ local function build_and_install(root_dir, gradlew, adb, device)
 
             -- Installing
             vim.notify("Installing...", vim.log.levels.INFO, {})
-            local install_obj = vim.system(
-                { adb, "-s", device.id, "install", project_dir .. "/build/outputs/apk/debug/app-debug.apk" },
-                {}
-            ):wait()
+            local install_obj = vim.system({
+                adb,
+                "-s",
+                device.id,
+                "install",
+                root_dir .. "/build/outputs/apk/debug/" .. vim.fn.fnamemodify(root_dir, ":t") .. "-debug.apk",
+            }, {}):wait()
             if install_obj.code ~= 0 then
                 vim.notify("Installation failed: " .. install_obj.stderr, vim.log.levels.ERROR, {})
                 return
