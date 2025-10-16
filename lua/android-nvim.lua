@@ -242,7 +242,7 @@ local function build_and_install(root_dir, gradlew, adb, device)
         1000,
         vim.schedule_wrap(function()
             time_passed = time_passed + 1
-            vim.notify("Building for " .. time_passed .. " seconds.", vim.log.levels.INFO, {})
+            vim.notify("Building for " .. time_passed .. " seconds.", vim.log.levels.DEBUG, {})
         end)
     )
 
