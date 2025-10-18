@@ -8,30 +8,16 @@ local function trim(s)
 end
 
 local function trim_all(s)
-    return s:gsub("%s+", "")
+	return s:gsub("%s+", "")
 end
 
-local function find_gradlew(directory)
-	local cwd = directory
-	if cwd == nil then
-		cwd = vim.fn.getcwd()
-	end
-	local parent = vim.fn.fnamemodify(cwd, ":h")
+local function find_gradlew(from_file)
+	local buf_name = from_file or vim.api.nvim_buf_get_name(0)
+	local gradlew = vim.fs.find("gradlew", { upward = true, path = buf_name })[1]
+	local build_script = vim.fs.find("build.gradle.kts", { upward = true, path = buf_name })[1]
+	local module_root = vim.fn.fnamemodify(build_script, ":h")
 
-	local obj = vim.system({'find', cwd, "-maxdepth", "1", "-name", "gradlew"}, {}):wait()
-	local result = obj.stdout
-
-	if result == nil or #result == 0 then
-		if cwd == parent then
-			-- we reached root
-			return nil
-		end
-
-		-- recursive call
-		return find_gradlew(parent)
-	end
-
-	return { cwd = cwd, gradlew = trim(result) }
+	return { module_root = module_root, gradlew = gradlew }
 end
 
 local apply_to_window = function(buf, data)
@@ -40,36 +26,36 @@ local apply_to_window = function(buf, data)
 	end
 
 	local result = {}
-	for line in data:gmatch("[^\n]+") do
+	for line in data:gmatch "[^\n]+" do
 		result[#result + 1] = line
 	end
 
 	local buffer_lines = vim.api.nvim_buf_line_count(buf) or 0
 
-	vim.api.nvim_set_option_value("modifiable", true, {buf=buf})
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 	vim.api.nvim_buf_set_lines(buf, buffer_lines, buffer_lines + #data, false, result)
-	vim.api.nvim_set_option_value("modifiable", false, {buf=buf})
+	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
-	vim.api.nvim_win_set_cursor(window, {buffer_lines + #result, 0})
+	vim.api.nvim_win_set_cursor(window, { buffer_lines + #result, 0 })
 
 	return buffer_lines, buffer_lines + #result
 end
 
 local function create_build_window()
 	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_set_option_value("modifiable", false, {buf=buf})
-	vim.api.nvim_set_option_value("buftype", 'nofile', {buf=buf})
-	vim.api.nvim_set_option_value("bufhidden", 'wipe', {buf=buf})
+	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+	vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+	vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
 
 	if window ~= nil and vim.api.nvim_win_is_valid(window) then
 		vim.api.nvim_win_close(window, true)
 	end
 
 	window = vim.api.nvim_open_win(buf, true, {
-		split="below",
-		width=vim.o.columns,
-		height=10,
-		style="minimal"
+		split = "below",
+		width = vim.o.columns,
+		height = 10,
+		style = "minimal",
 	})
 
 	return buf
@@ -97,36 +83,40 @@ local function build_release()
 
 	local buf = create_build_window()
 
-	vim.system({ gradlew, "assembleRelease" }, {
-		text = true,
-		stdout = vim.schedule_wrap(function(_, data)
-			apply_to_window(buf, data)
-		end),
-		stderr = vim.schedule_wrap(function(_, data)
-			local start, finish = apply_to_window(buf, data)
-			for line = start, finish do
-				vim.api.nvim_buf_add_highlight(buf, -1, "Error", line, 0, -1)
+	vim.system(
+		{ gradlew, "assembleRelease" },
+		{
+			text = true,
+			stdout = vim.schedule_wrap(function(_, data)
+				apply_to_window(buf, data)
+			end),
+			stderr = vim.schedule_wrap(function(_, data)
+				local start, finish = apply_to_window(buf, data)
+				for line = start, finish do
+					vim.api.nvim_buf_add_highlight(buf, -1, "Error", line, 0, -1)
+				end
+			end),
+		},
+		vim.schedule_wrap(function(obj)
+			timer:stop()
+			if obj.code == 0 then
+				vim.notify("Build successful.", vim.log.levels.INFO, {})
+			else
+				vim.notify("Build failed: " .. obj.stderr, vim.log.levels.ERROR, {})
 			end
 		end)
-	}, vim.schedule_wrap(function(obj)
-		timer:stop()
-		if obj.code == 0 then
-			vim.notify("Build successful.", vim.log.levels.INFO, {})
-		else
-			vim.notify("Build failed: " .. obj.stderr, vim.log.levels.ERROR, {})
-		end
-	end))
+	)
 end
 
 local function clean()
-	local gradlew = find_gradlew()
+	local gradlew = find_gradlew().gradlew
 	if gradlew == nil then
 		vim.notify("Build failed: gradlew is not found.", vim.log.levels.ERROR, {})
 		return
 	end
 
 	vim.system(
-		{ gradlew.gradlew, "clean" },
+		{ gradlew, "clean" },
 		{ text = true },
 		vim.schedule_wrap(function(obj)
 			if obj.code == 0 then
@@ -163,7 +153,7 @@ local function get_device_names(adb, ids)
 	for i = 1, #ids do
 		local id = ids[i]
 		local cmd
-		if id:match("^emulator") then
+		if id:match "^emulator" then
 			cmd = { adb, "-s", id, "emu", "avd", "name" }
 		else
 			cmd = { adb, "-s", id, "shell", "getprop", "ro.product.model" }
@@ -171,12 +161,11 @@ local function get_device_names(adb, ids)
 		local obj = vim.system(cmd, {}):wait()
 		if obj.code == 0 then
 			local read = obj.stdout or ""
-			local device_name = read:match("^(.-)\n") or read
+			local device_name = read:match "^(.-)\n" or read
 			table.insert(devices, device_name)
 		end
 	end
 	return devices
-
 end
 
 local function get_running_devices(adb)
@@ -195,9 +184,9 @@ local function get_running_devices(adb)
 	return devices
 end
 
-local function find_application_id(root_dir)
-	local file_path = root_dir .. "/app/build.gradle"
-	local file_path_kt = root_dir .. "/app/build.gradle.kts"
+local function find_application_id(project_dir)
+	local file_path = project_dir .. "/build.gradle"
+	local file_path_kt = project_dir .. "/build.gradle.kts"
 
 	local file = io.open(file_path, "r")
 	if not file then
@@ -207,12 +196,12 @@ local function find_application_id(root_dir)
 		end
 	end
 
-	local content = file:read("*all")
+	local content = file:read "*all"
 	file:close()
 
-	for line in content:gmatch("[^\r\n]+") do
-		if line:find("applicationId") then
-			local app_id = line:match(".*[\"']([^\"']+)[\"']")
+	for line in content:gmatch "[^\r\n]+" do
+		if line:find "applicationId" then
+			local app_id = line:match ".*[\"']([^\"']+)[\"']"
 			return app_id
 		end
 	end
@@ -221,7 +210,11 @@ local function find_application_id(root_dir)
 end
 
 local function find_main_activity(adb, device_id, application_id)
-	local obj = vim.system({adb, "-s", device_id, "shell", "cmd", "package", "resolve-activity", "--brief", application_id}, {}):wait()
+	local obj = vim.system(
+		{ adb, "-s", device_id, "shell", "cmd", "package", "resolve-activity", "--brief", application_id },
+		{}
+	)
+		:wait()
 	if obj.code ~= 0 then
 		return nil
 	end
@@ -229,7 +222,7 @@ local function find_main_activity(adb, device_id, application_id)
 	local read = obj.stdout or ""
 
 	local result = nil
-	for line in read:gmatch("[^\r\n]+") do
+	for line in read:gmatch "[^\r\n]+" do
 		result = line
 	end
 
@@ -239,8 +232,7 @@ local function find_main_activity(adb, device_id, application_id)
 	return trim(result)
 end
 
-
-local function build_and_install(root_dir, gradle, adb, device)
+local function build_and_install(root_dir, gradlew, adb, device)
 	local buf = create_build_window()
 
 	local time_passed = 0
@@ -250,65 +242,88 @@ local function build_and_install(root_dir, gradle, adb, device)
 		1000,
 		vim.schedule_wrap(function()
 			time_passed = time_passed + 1
-			vim.notify("Building for " .. time_passed .. " seconds.", vim.log.levels.INFO, {})
+			vim.notify("Building for " .. time_passed .. " seconds.", vim.log.levels.DEBUG, {})
 		end)
 	)
 
-	vim.system({ gradle, "assembleDebug" }, {
-		text = true,
-		stdout = vim.schedule_wrap(function(_, data)
-			apply_to_window(buf, data)
-		end),
-		stderr = vim.schedule_wrap(function(_, data)
-			local start, finish = apply_to_window(buf, data)
-			for line = start, finish do
-				vim.api.nvim_buf_add_highlight(buf, -1, "Error", line, 0, -1)
+	vim.system(
+		{ gradlew, "assembleDebug" },
+		{
+			text = true,
+			stdout = vim.schedule_wrap(function(_, data)
+				apply_to_window(buf, data)
+			end),
+			stderr = vim.schedule_wrap(function(_, data)
+				local start, finish = apply_to_window(buf, data)
+				for line = start, finish do
+					vim.api.nvim_buf_add_highlight(buf, -1, "Error", line, 0, -1)
+				end
+			end),
+		},
+		vim.schedule_wrap(function(obj)
+			timer:stop()
+			if obj.code ~= 0 then
+				vim.notify("Build failed.", vim.log.levels.ERROR, {})
+				return
 			end
+
+			-- Installing
+			vim.notify("Installing...", vim.log.levels.INFO, {})
+			local install_obj = vim.system({
+				adb,
+				"-s",
+				device.id,
+				"install",
+				root_dir .. "/build/outputs/apk/debug/" .. vim.fn.fnamemodify(root_dir, ":t") .. "-debug.apk",
+			}, {}):wait()
+			if install_obj.code ~= 0 then
+				vim.notify("Installation failed: " .. install_obj.stderr, vim.log.levels.ERROR, {})
+				return
+			end
+
+			-- Launch the app
+			vim.notify("Launching...", vim.log.levels.INFO, {})
+			local application_id = find_application_id(root_dir)
+			if application_id == nil then
+				vim.notify("Failed to launch application, did not find application id", vim.log.levels.ERROR, {})
+				return
+			end
+
+			local main_activity = find_main_activity(adb, device.id, application_id)
+			if main_activity == nil then
+				vim.notify("Failed to launch application, did not find main activity", vim.log.levels.ERROR, {})
+				return
+			end
+
+			local launch_obj = vim.system({
+				adb,
+				"-s",
+				device.id,
+				"shell",
+				"am",
+				"start",
+				"-a",
+				"android.intent.action.MAIN",
+				"-c",
+				"android.intent.category.LAUNCHER",
+				"-n",
+				main_activity,
+			}, {}):wait()
+			if launch_obj.code ~= 0 then
+				vim.notify("Failed to launch application: " .. launch_obj.stderr, vim.log.levels.ERROR, {})
+				return
+			end
+
+			vim.notify("Successfully built and launched the application!", vim.log.levels.INFO, {})
+
+			vim.api.nvim_win_close(window, true)
 		end)
-	}, vim.schedule_wrap(function(obj)
-		timer:stop()
-		if obj.code ~= 0 then
-			vim.notify("Build failed.", vim.log.levels.ERROR, {})
-			return
-		end
-
-		-- Installing
-		vim.notify("Installing...", vim.log.levels.INFO, {})
-		local install_obj = vim.system({adb, '-s', device.id, "install", root_dir .. "/app/build/outputs/apk/debug/app-debug.apk"}, {}):wait()
-		if install_obj.code ~= 0 then
-			vim.notify("Installation failed: " .. install_obj.stderr, vim.log.levels.ERROR, {})
-			return
-		end
-
-		-- Launch the app
-		vim.notify("Launching...", vim.log.levels.INFO, {})
-		local application_id = find_application_id(root_dir)
-		if application_id == nil then
-			vim.notify("Failed to launch application, did not find application id", vim.log.levels.ERROR, {})
-			return
-		end
-
-		local main_activity = find_main_activity(adb, device.id, application_id)
-		if main_activity == nil then
-			vim.notify("Failed to launch application, did not find main activity", vim.log.levels.ERROR, {})
-			return
-		end
-
-		local launch_obj = vim.system({adb, "-s", device.id, "shell", "am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", main_activity}, {}):wait()
-		if launch_obj.code ~= 0 then
-			vim.notify("Failed to launch application: " .. launch_obj.stderr, vim.log.levels.ERROR, {})
-			return
-		end
-
-		vim.notify("Successfully built and launched the application!", vim.log.levels.INFO, {})
-
-		vim.api.nvim_win_close(window, true)
-	end))
+	)
 end
 
 local function build_and_run()
 	local gradlew = find_gradlew()
-	if gradlew == nil then
+	if gradlew.gradlew == nil then
 		vim.notify("Build failed: gradlew is not found.", vim.log.levels.ERROR, {})
 		return
 	end
@@ -334,7 +349,7 @@ local function build_and_run()
 	}, function(choice)
 		if choice then
 			vim.notify("Device selected: " .. choice.name, vim.log.levels.INFO, {})
-			build_and_install(gradlew.cwd, gradlew.gradlew, adb, choice)
+			build_and_install(gradlew.module_root, gradlew.gradlew, adb, choice)
 		else
 			vim.notify("Build cancelled.", vim.log.levels.WARN, {})
 		end
@@ -343,12 +358,12 @@ end
 
 local function uninstall()
 	local gradlew = find_gradlew()
-	if gradlew == nil then
+	if gradlew.gradlew == nil then
 		vim.notify("Uninstall failed: gradlew is not found.", vim.log.levels.ERROR, {})
 		return
 	end
 
-	local application_id = find_application_id(gradlew.cwd)
+	local application_id = find_application_id(gradlew.module_root)
 	if gradlew == nil then
 		vim.notify("Uninstall failed: could not find application id.", vim.log.levels.ERROR, {})
 		return
@@ -375,7 +390,7 @@ local function uninstall()
 	}, function(choice)
 		if choice then
 			vim.notify("Device selected: " .. choice.name, vim.log.levels.INFO, {})
-			local uninstall_obj = vim.system({adb, "-s", choice.id, "uninstall", application_id}, {}):wait()
+			local uninstall_obj = vim.system({ adb, "-s", choice.id, "uninstall", application_id }, {}):wait()
 			if uninstall_obj.code == 0 then
 				vim.notify("Uninstall successful.", vim.log.levels.INFO, {})
 			else
@@ -399,7 +414,7 @@ local function launch_avd()
 
 	local read = avds_obj.stdout or ""
 	local avds = {}
-	for line in read:gmatch("[^\r\n]+") do
+	for line in read:gmatch "[^\r\n]+" do
 		table.insert(avds, line)
 	end
 	table.remove(avds, 1)
@@ -409,11 +424,15 @@ local function launch_avd()
 	}, function(choice)
 		if choice then
 			vim.notify("Device selected: " .. choice .. ". Launching!", vim.log.levels.INFO, {})
-			vim.system({ emulator, "@" .. choice }, { text = true }, vim.schedule_wrap(function(obj)
-				if obj.code ~= 0 then
-					vim.notify("Launch failed: " .. obj.stderr, vim.log.levels.WARN, {})
-				end
-			end))
+			vim.system(
+				{ emulator, "@" .. choice },
+				{ text = true },
+				vim.schedule_wrap(function(obj)
+					if obj.code ~= 0 then
+						vim.notify("Launch failed: " .. obj.stderr, vim.log.levels.WARN, {})
+					end
+				end)
+			)
 		else
 			vim.notify("Launch cancelled.", vim.log.levels.WARN, {})
 		end
@@ -421,217 +440,221 @@ local function launch_avd()
 end
 
 local function refresh_dependencies()
-	local gradlew = find_gradlew()
+	local gradlew = find_gradlew().gradlew
 	if gradlew == nil then
 		vim.notify("Refreshing dependencies failed, not able to find gradlew", vim.log.levels.ERROR, {})
 		return
 	end
 
 	vim.notify("Refreshing dependencies", vim.log.levels.INFO, {})
-	vim.system({gradlew.gradlew, "--refresh-dependencies"}, {}, vim.schedule_wrap(function(obj)
-		if obj.code ~= 0 then
-			vim.notify("Refreshing dependencies failed: " .. obj.stderr, vim.log.levels.ERROR, {})
-			return
-		end
-		vim.notify("Refreshing dependencies sucessfully", vim.log.levels.INFO, {})
-	end))
+	vim.system(
+		{ gradlew, "--refresh-dependencies" },
+		{},
+		vim.schedule_wrap(function(obj)
+			if obj.code ~= 0 then
+				vim.notify("Refreshing dependencies failed: " .. obj.stderr, vim.log.levels.ERROR, {})
+				return
+			end
+			vim.notify("Refreshing dependencies sucessfully", vim.log.levels.INFO, {})
+		end)
+	)
 end
 
 local function move_files(from_dir, to_dir)
-    local files = vim.fn.readdir(from_dir)
-    for _, file in ipairs(files) do
-        local from = from_dir .. "/" .. file
-        local to = to_dir .. "/" .. file
-        vim.fn.rename(from, to)
-    end
+	local files = vim.fn.readdir(from_dir)
+	for _, file in ipairs(files) do
+		local from = from_dir .. "/" .. file
+		local to = to_dir .. "/" .. file
+		vim.fn.rename(from, to)
+	end
 end
 
 local function match_and_replace(match, replace, file)
-    local lines = vim.fn.readfile(file)
-    local changed = false
-    for i, line in ipairs(lines) do
-        if line:match(match) then
-            lines[i] = line:gsub(match, replace)
-            changed = true
-        end
-    end
-    if changed then
-        vim.fn.writefile(lines, file)
-    end
+	local lines = vim.fn.readfile(file)
+	local changed = false
+	for i, line in ipairs(lines) do
+		if line:match(match) then
+			lines[i] = line:gsub(match, replace)
+			changed = true
+		end
+	end
+	if changed then
+		vim.fn.writefile(lines, file)
+	end
 end
 
 local function match_and_replace_dir(match, replace, dir)
-    local files = vim.fn.glob(dir .. "/**/*.kt", true, true)
-    for _, file in ipairs(files) do
-        match_and_replace(match, replace, file)
-    end
+	local files = vim.fn.glob(dir .. "/**/*.kt", true, true)
+	for _, file in ipairs(files) do
+		match_and_replace(match, replace, file)
+	end
 end
 
 local function get_templates()
-    local templates = {}
-    local template_sources = {}
+	local templates = {}
+	local template_sources = {}
 
-    local templates_dir
-    for _, path in ipairs(vim.api.nvim_list_runtime_paths()) do
-        if path:match "android%-nvim" then
-            templates_dir = path .. "/templates"
-            break
-        end
-    end
+	local templates_dir
+	for _, path in ipairs(vim.api.nvim_list_runtime_paths()) do
+		if path:match "android%-nvim" then
+			templates_dir = path .. "/templates"
+			break
+		end
+	end
 
-    if templates_dir then
-        vim.list_extend(template_sources, vim.fn.globpath(templates_dir, "*", 0, 1))
-    end
-    if vim.g.android_templates_dir then
-        vim.list_extend(template_sources, vim.fn.globpath(vim.g.android_templates_dir, "*", 0, 1))
-    end
-    if vim.g.android_templates then
-        vim.list_extend(template_sources, vim.g.android_templates)
-    end
+	if templates_dir then
+		vim.list_extend(template_sources, vim.fn.globpath(templates_dir, "*", 0, 1))
+	end
+	if vim.g.android_templates_dir then
+		vim.list_extend(template_sources, vim.fn.globpath(vim.g.android_templates_dir, "*", 0, 1))
+	end
+	if vim.g.android_templates then
+		vim.list_extend(template_sources, vim.g.android_templates)
+	end
 
-    for _, path in ipairs(template_sources) do
-        if vim.fn.isdirectory(path) == 1 then
-            table.insert(templates, {
-                name = vim.fn.fnamemodify(path, ":t"),
-                path = path,
-            })
-        end
-    end
+	for _, path in ipairs(template_sources) do
+		if vim.fn.isdirectory(path) == 1 then
+			table.insert(templates, {
+				name = vim.fn.fnamemodify(path, ":t"),
+				path = path,
+			})
+		end
+	end
 
-    return templates
+	return templates
 end
 
 local function get_main_activity_path(path)
-    local java_root = path .. "/app/src/main/java"
+	local java_root = path .. "/app/src/main/java"
 
-    local function search(dir)
-        for _, entry in ipairs(vim.fn.readdir(dir)) do
-            local full_path = dir .. "/" .. entry
-            if vim.fn.isdirectory(full_path) == 1 then
-                local found = search(full_path)
-                if found then
-                    return found
-                end
-            elseif entry == "MainActivity.kt" then
-                return full_path
-            end
-        end
-    end
+	local function search(dir)
+		for _, entry in ipairs(vim.fn.readdir(dir)) do
+			local full_path = dir .. "/" .. entry
+			if vim.fn.isdirectory(full_path) == 1 then
+				local found = search(full_path)
+				if found then
+					return found
+				end
+			elseif entry == "MainActivity.kt" then
+				return full_path
+			end
+		end
+	end
 
-    return search(java_root)
+	return search(java_root)
 end
 
 local function get_package_name(main_activity_path)
-    for _, line in ipairs(vim.fn.readfile(main_activity_path)) do
-        local pkg = line:match "^%s*package%s+([%w%.]+)"
-        if pkg then
-            return pkg
-        end
-    end
+	for _, line in ipairs(vim.fn.readfile(main_activity_path)) do
+		local pkg = line:match "^%s*package%s+([%w%.]+)"
+		if pkg then
+			return pkg
+		end
+	end
 end
 
 local function update_template(name, package, template)
-    local root = name
-    local name_trimmed = trim_all(name)
-    local template_name_trimmed = trim_all(template.name)
-    local package_path = package:gsub("%.", "/")
-    local template_main_activity_path = get_main_activity_path(template.path)
-    local template_package = get_package_name(template_main_activity_path)
-    local template_package_path = template_package:gsub("%.", "/")
-    local src_path = root .. "/app/src"
-    local main_path = root .. "/app/src/main/java/" .. package_path
-    local test_path = root .. "/app/src/test/java/" .. package_path
-    local android_test_path = root .. "/app/src/androidTest/java/" .. package_path
-    local template_path = root .. "/app/src/main/java/" .. template_package_path
-    local template_test_path = root .. "/app/src/test/java/" .. template_package_path
-    local template_android_test_path = root .. "/app/src/androidTest/java/" .. template_package_path
-    local settings_file = root .. "/settings.gradle.kts"
-    local gradle_file = root .. "/app/build.gradle.kts"
-    local manifest_file = root .. "/app/src/main/AndroidManifest.xml"
+	local root = name
+	local name_trimmed = trim_all(name)
+	local template_name_trimmed = trim_all(template.name)
+	local package_path = package:gsub("%.", "/")
+	local template_main_activity_path = get_main_activity_path(template.path)
+	local template_package = get_package_name(template_main_activity_path)
+	local template_package_path = template_package:gsub("%.", "/")
+	local src_path = root .. "/app/src"
+	local main_path = root .. "/app/src/main/java/" .. package_path
+	local test_path = root .. "/app/src/test/java/" .. package_path
+	local android_test_path = root .. "/app/src/androidTest/java/" .. package_path
+	local template_path = root .. "/app/src/main/java/" .. template_package_path
+	local template_test_path = root .. "/app/src/test/java/" .. template_package_path
+	local template_android_test_path = root .. "/app/src/androidTest/java/" .. template_package_path
+	local settings_file = root .. "/settings.gradle.kts"
+	local gradle_file = root .. "/app/build.gradle.kts"
+	local manifest_file = root .. "/app/src/main/AndroidManifest.xml"
 
-    local theme = name_trimmed .. "Theme"
-    local template_theme = template_name_trimmed .. "Theme"
-    local theme_import = package .. ".ui.theme." .. theme
-    local template_theme_import = template_package .. ".ui.theme." .. template_theme
+	local theme = name_trimmed .. "Theme"
+	local template_theme = template_name_trimmed .. "Theme"
+	local theme_import = package .. ".ui.theme." .. theme
+	local template_theme_import = template_package .. ".ui.theme." .. template_theme
 
-    vim.fn.mkdir(main_path, "p")
-    vim.fn.mkdir(test_path, "p")
-    vim.fn.mkdir(android_test_path, "p")
+	vim.fn.mkdir(main_path, "p")
+	vim.fn.mkdir(test_path, "p")
+	vim.fn.mkdir(android_test_path, "p")
 
-    move_files(template_path, main_path)
-    move_files(template_test_path, test_path)
-    move_files(template_android_test_path, android_test_path)
+	move_files(template_path, main_path)
+	move_files(template_test_path, test_path)
+	move_files(template_android_test_path, android_test_path)
 
-    vim.fn.delete(template_path, "d")
-    vim.fn.delete(template_test_path, "d")
-    vim.fn.delete(template_android_test_path, "d")
+	vim.fn.delete(template_path, "d")
+	vim.fn.delete(template_test_path, "d")
+	vim.fn.delete(template_android_test_path, "d")
 
-    match_and_replace(template.name, name, settings_file)
-    match_and_replace(template_package, package, gradle_file)
-    match_and_replace(template_name_trimmed, name_trimmed, manifest_file)
+	match_and_replace(template.name, name, settings_file)
+	match_and_replace(template_package, package, gradle_file)
+	match_and_replace(template_name_trimmed, name_trimmed, manifest_file)
 
-    match_and_replace_dir(template_package, package, src_path)
-    match_and_replace_dir(template_theme, theme, src_path)
-    match_and_replace_dir(template_theme_import, theme_import, src_path)
+	match_and_replace_dir(template_package, package, src_path)
+	match_and_replace_dir(template_theme, theme, src_path)
+	match_and_replace_dir(template_theme_import, theme_import, src_path)
 end
 
 local function create_compose_from_template(name, package, template, project_root)
-    if vim.fn.isdirectory(project_root) == 1 then
-        vim.notify("Project already exists at: " .. project_root, vim.log.levels.WARN)
-        return
-    end
+	if vim.fn.isdirectory(project_root) == 1 then
+		vim.notify("Project already exists at: " .. project_root, vim.log.levels.WARN)
+		return
+	end
 
-    vim.fn.mkdir(project_root, "p")
-    vim.fn.system("cp -a " .. template.path .. "/. " .. project_root)
-    update_template(name, package, template)
+	vim.fn.mkdir(project_root, "p")
+	vim.fn.system("cp -a " .. template.path .. "/. " .. project_root)
+	update_template(name, package, template)
 end
 
 local function create_new_compose()
-    local templates = get_templates()
-    local template_names = vim.tbl_map(function(t)
-        return t.name
-    end, templates)
+	local templates = get_templates()
+	local template_names = vim.tbl_map(function(t)
+		return t.name
+	end, templates)
 
-    if #templates == 0 then
-        vim.notify("No templates found in: ", vim.log.levels.ERROR)
-        return
-    end
+	if #templates == 0 then
+		vim.notify("No templates found in: ", vim.log.levels.ERROR)
+		return
+	end
 
-    async.void(function()
-        local template_name = select(template_names, { prompt = "Select a template: " })
-        if not template_name then
-            return
-        end
-        local name = trim(input { prompt = "App name: " })
-        if not name then
-            return
-        end
-        local package = trim_all(input { prompt = "Package (e.g., org.example.myapp): " })
-        if not package then
-            return
-        end
+	async.void(function()
+		local template_name = select(template_names, { prompt = "Select a template: " })
+		if not template_name then
+			return
+		end
+		local name = trim(input { prompt = "App name: " })
+		if not name then
+			return
+		end
+		local package = trim_all(input { prompt = "Package (e.g., org.example.myapp): " })
+		if not package then
+			return
+		end
 
-        local template = vim.tbl_filter(function(t)
-            return t.name == template_name
-        end, templates)[1]
-        if not template then
-            return
-        end
+		local template = vim.tbl_filter(function(t)
+			return t.name == template_name
+		end, templates)[1]
+		if not template then
+			return
+		end
 
-        local project_root = vim.fn.getcwd() .. "/" .. name
-        create_compose_from_template(name, package, template, project_root)
+		local project_root = vim.fn.getcwd() .. "/" .. name
+		create_compose_from_template(name, package, template, project_root)
 
-        local main_activity_path = get_main_activity_path(project_root)
+		local main_activity_path = get_main_activity_path(project_root)
 
-        vim.cmd("cd " .. vim.fn.fnameescape(project_root))
-        if main_activity_path then
-            vim.cmd("edit " .. vim.fn.fnameescape(main_activity_path))
-        else
-            vim.notify("MainActivity.kt not found", vim.log.levels.WARN)
-        end
+		vim.cmd("cd " .. vim.fn.fnameescape(project_root))
+		if main_activity_path then
+			vim.cmd("edit " .. vim.fn.fnameescape(main_activity_path))
+		else
+			vim.notify("MainActivity.kt not found", vim.log.levels.WARN)
+		end
 
-        vim.notify("Project created at ./" .. name, vim.log.levels.INFO)
-    end)()
+		vim.notify("Project created at ./" .. name, vim.log.levels.INFO)
+	end)()
 end
 
 local function setup()
@@ -660,8 +683,8 @@ local function setup()
 	end, {})
 
 	vim.api.nvim_create_user_command("AndroidNew", function()
-                create_new_compose()
-        end, {})
+		create_new_compose()
+	end, {})
 end
 
 return {
@@ -671,5 +694,5 @@ return {
 	refresh_dependencies = refresh_dependencies,
 	launch_avd = launch_avd,
 	clean = clean,
-	uninstall = uninstall
+	uninstall = uninstall,
 }
