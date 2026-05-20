@@ -122,43 +122,392 @@ local function select_modal(items, opts, on_choice)
 	})
 end
 
-local function show_menu(prompt, items, parent)
-	select_modal(items, {
-		prompt = prompt,
-		format_item = function(item)
-			return item.label
+local RECENT_PATH = vim.fn.stdpath("data") .. "/android-nvim/recent.json"
+local MAX_RECENT = 3
+
+local function load_recent_action_ids()
+	local file = io.open(RECENT_PATH, "r")
+	if not file then
+		return {}
+	end
+	local content = file:read("*a")
+	file:close()
+
+	local ok, decoded = pcall(vim.json.decode, content)
+	if not ok or type(decoded) ~= "table" then
+		return {}
+	end
+
+	local recent = {}
+	for _, id in ipairs(decoded) do
+		if type(id) == "string" and id ~= "" then
+			recent[#recent + 1] = id
+		end
+	end
+	return recent
+end
+
+local function record_recent_action(id)
+	local recent = load_recent_action_ids()
+	local next_recent = { id }
+	for _, existing in ipairs(recent) do
+		if existing ~= id and #next_recent < MAX_RECENT then
+			next_recent[#next_recent + 1] = existing
+		end
+	end
+
+	vim.fn.mkdir(vim.fn.fnamemodify(RECENT_PATH, ":h"), "p")
+	local file = io.open(RECENT_PATH, "w")
+	if not file then
+		return
+	end
+	file:write(vim.json.encode(next_recent))
+	file:close()
+end
+
+local SEARCH_NS = vim.api.nvim_create_namespace("android-nvim-search")
+
+local GROUP_ORDER = {
+	"Build & deploy",
+	"Emulator",
+	"Android Studio",
+	"Device",
+	"Project",
+}
+
+local function actions_for_group(actions, group)
+	local grouped = {}
+	for _, action in ipairs(actions) do
+		if action.group == group then
+			grouped[#grouped + 1] = action
+		end
+	end
+	return grouped
+end
+
+local function action_matches(action, search_query)
+	if search_query == "" then
+		return true
+	end
+	local haystack = (action.label .. " " .. action.group .. " " .. (action.keywords or "")):lower()
+	return haystack:find(search_query, 1, true) ~= nil
+end
+
+local function run_action(action)
+	record_recent_action(action.id)
+	action.run()
+end
+
+local function ensure_menu_highlights()
+	local ok, normal = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
+	local bg = ok and normal.bg or "NONE"
+	vim.api.nvim_set_hl(0, "AndroidNvimMenuHeader", { fg = "#888899", bg = bg, bold = true })
+	vim.api.nvim_set_hl(0, "AndroidNvimMenuRecent", { fg = "#b0b0c0", bg = bg, blend = 25 })
+	vim.api.nvim_set_hl(0, "AndroidNvimMenuGroup", { fg = "#d0d0e0", bg = bg })
+end
+
+local function show_group_menu(group, actions, show_root)
+	local group_actions = actions_for_group(actions, group)
+	if #group_actions == 0 then
+		vim.notify("No actions in " .. group .. ".", vim.log.levels.WARN, {})
+		show_root()
+		return
+	end
+
+	select_modal(group_actions, {
+		prompt = group,
+		format_item = function(action)
+			return action.label
 		end,
-		on_back = parent and function()
-			show_menu(parent.prompt, parent.items, parent.parent)
-		end or nil,
+		on_back = show_root,
 	}, function(choice)
-		if not choice then
-			return
-		end
-
-		if choice.load then
-			choice.load(function(loaded_items)
-				if loaded_items == nil or #loaded_items == 0 then
-					vim.notify(choice.empty_message or "No options available.", vim.log.levels.WARN, {})
-					if parent then
-						show_menu(parent.prompt, parent.items, parent.parent)
-					end
-					return
-				end
-				show_menu(choice.label, loaded_items, { prompt = prompt, items = items, parent = parent })
-			end)
-			return
-		end
-
-		if choice.items then
-			show_menu(choice.label, choice.items, { prompt = prompt, items = items, parent = parent })
-			return
-		end
-
-		if choice.action then
-			choice.action()
+		if choice then
+			run_action(choice)
 		end
 	end)
+end
+
+local function select_root_menu(actions)
+	ensure_menu_highlights()
+
+	local action_by_id = {}
+	for _, action in ipairs(actions) do
+		action_by_id[action.id] = action
+	end
+
+	local recent_ids = load_recent_action_ids()
+	local query = ""
+	local selectable = {}
+	local row_to_index = {}
+	local done = false
+	local width = math.min(72, math.floor(vim.o.columns * 0.85))
+	local list_start_row = 3
+
+	local function show_root()
+		select_root_menu(actions)
+	end
+
+	local function build_display(search_query)
+		search_query = trim(search_query):lower()
+		local separator = string.rep("─", math.max(width - 2, 8))
+		local result_lines = { separator }
+		local highlights = {}
+		local items = {}
+		local row_map = {}
+
+		local function buf_row()
+			return 1 + #result_lines
+		end
+
+		local function add_header(label)
+			result_lines[#result_lines + 1] = "  " .. label
+			highlights[#highlights + 1] = { buf_row(), "AndroidNvimMenuHeader", 0, -1 }
+		end
+
+		local function add_item(text, entry, hl_group)
+			result_lines[#result_lines + 1] = "  " .. text
+			local row = buf_row()
+			items[#items + 1] = entry
+			row_map[row] = #items
+			if hl_group then
+				highlights[#highlights + 1] = { row, hl_group, 0, -1 }
+			end
+		end
+
+		if search_query ~= "" then
+			for _, action in ipairs(actions) do
+				if action_matches(action, search_query) then
+					add_item(action.group .. "  " .. action.label, {
+						kind = "action",
+						action = action,
+					})
+				end
+			end
+			return result_lines, items, row_map, highlights
+		end
+
+		local recent_actions = {}
+		for _, id in ipairs(recent_ids) do
+			local action = action_by_id[id]
+			if action then
+				recent_actions[#recent_actions + 1] = action
+			end
+		end
+
+		if #recent_actions > 0 then
+			add_header("Recent")
+			for _, action in ipairs(recent_actions) do
+				add_item(action.label, {
+					kind = "action",
+					action = action,
+				}, "AndroidNvimMenuRecent")
+			end
+		end
+
+		add_header("Browse")
+		for _, group in ipairs(GROUP_ORDER) do
+			if #actions_for_group(actions, group) > 0 then
+				add_item(group, {
+					kind = "group",
+					group = group,
+				}, "AndroidNvimMenuGroup")
+			end
+		end
+
+		return result_lines, items, row_map, highlights
+	end
+
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].bufhidden = "wipe"
+	vim.bo[buf].filetype = "android-nvim-actions"
+
+	local border = vim.o.winborder ~= "" and vim.o.winborder or "rounded"
+
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = 12,
+		row = math.floor((vim.o.lines - 12) / 2) - 1,
+		col = math.floor((vim.o.columns - width) / 2),
+		style = "minimal",
+		border = border,
+		title = " Android ",
+	})
+
+	vim.wo[win].winfixbuf = true
+	vim.wo[win].cursorline = true
+	vim.wo[win].number = false
+	vim.wo[win].relativenumber = false
+
+	local function close_picker()
+		if done then
+			return
+		end
+		done = true
+		if vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+	end
+
+	local function choose_entry(index)
+		local entry = selectable[index]
+		if entry == nil then
+			return
+		end
+
+		if entry.kind == "group" then
+			close_picker()
+			show_group_menu(entry.group, actions, show_root)
+			return
+		end
+
+		run_action(entry.action)
+		close_picker()
+	end
+
+	local function highlight_search_area(separator, section_highlights)
+		vim.api.nvim_buf_clear_namespace(buf, SEARCH_NS, 0, -1)
+		vim.api.nvim_buf_add_highlight(buf, SEARCH_NS, "Visual", 0, 0, -1)
+		vim.api.nvim_buf_add_highlight(buf, SEARCH_NS, "Comment", 1, 0, #separator)
+		for _, hl in ipairs(section_highlights) do
+			vim.api.nvim_buf_add_highlight(buf, SEARCH_NS, hl[2], hl[1] - 1, hl[3], hl[4])
+		end
+	end
+
+	local function first_selectable_row()
+		local line_count = vim.api.nvim_buf_line_count(buf)
+		for row = list_start_row, line_count do
+			if row_to_index[row] then
+				return row
+			end
+		end
+		return nil
+	end
+
+	local function refresh_results()
+		local section_highlights
+		local result_lines
+		result_lines, selectable, row_to_index, section_highlights = build_display(query)
+
+		if #selectable == 0 then
+			result_lines[#result_lines + 1] = "  No matching actions"
+		end
+
+		vim.bo[buf].modifiable = true
+		vim.api.nvim_buf_set_lines(buf, 1, -1, false, result_lines)
+		highlight_search_area(result_lines[1], section_highlights)
+
+		local height = math.min(
+			math.max(#result_lines + (list_start_row - 1), 5),
+			math.floor(vim.o.lines * 0.6)
+		)
+		if vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_set_config(win, { height = height })
+		end
+	end
+
+	local function sync_query()
+		query = vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] or ""
+		refresh_results()
+	end
+
+	local function go_to_search()
+		vim.api.nvim_win_set_cursor(win, { 1, #query })
+		vim.cmd.startinsert()
+	end
+
+	local function go_to_first_entry()
+		local row = first_selectable_row()
+		if row == nil then
+			return
+		end
+		vim.cmd.stopinsert()
+		vim.api.nvim_win_set_cursor(win, { row, 0 })
+	end
+
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+	refresh_results()
+	vim.api.nvim_win_set_cursor(win, { 1, 0 })
+
+	local keymap_opts = { buffer = buf, nowait = true, silent = true }
+
+	vim.keymap.set("i", "<Esc>", close_picker, keymap_opts)
+	vim.keymap.set("n", "<Esc>", close_picker, keymap_opts)
+	vim.keymap.set("n", "q", close_picker, keymap_opts)
+	vim.keymap.set("i", "<Down>", go_to_first_entry, keymap_opts)
+
+	local function move_cursor(delta)
+		local row, col = unpack(vim.api.nvim_win_get_cursor(win))
+		local line_count = vim.api.nvim_buf_line_count(buf)
+		local target = row + delta
+		while target >= list_start_row and target <= line_count do
+			if row_to_index[target] then
+				vim.api.nvim_win_set_cursor(win, { target, col })
+				return
+			end
+			target = target + delta
+		end
+	end
+
+	vim.keymap.set("n", "<Up>", function()
+		local row = vim.api.nvim_win_get_cursor(win)[1]
+		if row <= list_start_row then
+			go_to_search()
+		else
+			move_cursor(-1)
+		end
+	end, keymap_opts)
+
+	vim.keymap.set("n", "j", function()
+		local row = vim.api.nvim_win_get_cursor(win)[1]
+		if row < list_start_row then
+			go_to_first_entry()
+		else
+			move_cursor(1)
+		end
+	end, keymap_opts)
+
+	vim.keymap.set("n", "k", function()
+		local row = vim.api.nvim_win_get_cursor(win)[1]
+		if row <= list_start_row then
+			go_to_search()
+		else
+			move_cursor(-1)
+		end
+	end, keymap_opts)
+
+	vim.keymap.set("n", "<CR>", function()
+		local row = vim.api.nvim_win_get_cursor(win)[1]
+		if row < list_start_row then
+			go_to_search()
+			return
+		end
+		local index = row_to_index[row]
+		if index then
+			choose_entry(index)
+		end
+	end, keymap_opts)
+
+	vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
+		buffer = buf,
+		callback = function()
+			if done then
+				return
+			end
+			sync_query()
+		end,
+	})
+
+	vim.api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(win),
+		once = true,
+		callback = function()
+			close_picker()
+		end,
+	})
+
+	vim.cmd.startinsert()
 end
 
 local function list_avds()
@@ -796,27 +1145,7 @@ local function uninstall()
 end
 
 local function launch_avd()
-	local avds, err = list_avds()
-	if avds == nil then
-		vim.notify(err, vim.log.levels.ERROR, {})
-		return
-	end
-	if #avds == 0 then
-		vim.notify("No emulators found.", vim.log.levels.WARN, {})
-		return
-	end
-
-	select_modal(avds, {
-		prompt = "AVD to start",
-	}, function(choice)
-		if choice then
-			run_cli_with_progress("LaunchAvd", "Launching " .. choice, { "emulator", "start", choice }, {
-				success = "Launched " .. choice .. ".",
-			})
-		else
-			vim.notify("Launch cancelled.", vim.log.levels.WARN, {})
-		end
-	end)
+	start_emulator_picker()
 end
 
 local function stop_avd()
@@ -949,95 +1278,133 @@ local function android_run_cli()
 	end)
 end
 
-local function build_android_menu()
+local function start_emulator_picker()
+	local avds, err = list_avds()
+	if avds == nil then
+		vim.notify(err, vim.log.levels.ERROR, {})
+		return
+	end
+	if #avds == 0 then
+		vim.notify("No emulators found.", vim.log.levels.WARN, {})
+		return
+	end
+
+	select_modal(avds, {
+		prompt = "AVD to start",
+	}, function(choice)
+		if choice then
+			run_cli_with_progress("LaunchAvd", "Launching " .. choice, { "emulator", "start", choice }, {
+				success = "Launched " .. choice .. ".",
+			})
+		end
+	end)
+end
+
+local function get_actions()
 	return {
 		{
-			label = "Build & deploy",
-			items = {
-				{ label = "Run debug app", action = build_and_run },
-				{ label = "Run with android CLI", action = android_run_cli },
-				{ label = "Build release", action = build_release },
-				{ label = "Clean project", action = clean },
-				{ label = "Refresh dependencies", action = refresh_dependencies },
-				{ label = "Uninstall app", action = uninstall },
-			},
+			id = "run_debug",
+			label = "Run debug app",
+			group = "Build & deploy",
+			keywords = "run debug gradle install launch adb",
+			run = build_and_run,
 		},
 		{
-			label = "Emulator",
-			items = {
-				{
-					label = "Start emulator",
-					load = function(callback)
-						local avds, err = list_avds()
-						if avds == nil then
-							vim.notify(err, vim.log.levels.ERROR, {})
-							callback({})
-							return
-						end
-
-						callback(vim.tbl_map(function(avd)
-							return {
-								label = avd,
-								action = function()
-									run_cli_with_progress("LaunchAvd", "Launching " .. avd, { "emulator", "start", avd }, {
-										success = "Launched " .. avd .. ".",
-									})
-								end,
-							}
-						end, avds))
-					end,
-					empty_message = "No emulators found.",
-				},
-				{ label = "Stop emulator", action = stop_avd },
-				{
-					label = "List emulators",
-					load = function(callback)
-						local avds, err = list_avds()
-						if avds == nil then
-							vim.notify(err, vim.log.levels.ERROR, {})
-							callback({})
-							return
-						end
-
-						callback(vim.tbl_map(function(avd)
-							return {
-								label = avd,
-								action = function()
-									vim.notify("Emulator: " .. avd, vim.log.levels.INFO, {})
-								end,
-							}
-						end, avds))
-					end,
-					empty_message = "No emulators found.",
-				},
-			},
+			id = "run_cli",
+			label = "Run with android CLI",
+			group = "Build & deploy",
+			keywords = "run deploy android cli debug",
+			run = android_run_cli,
 		},
 		{
-			label = "Android Studio",
-			items = {
-				{ label = "Open current file", action = open_in_android_studio },
-				{ label = "Check Studio status", action = studio_check },
-			},
+			id = "build_release",
+			label = "Build release",
+			group = "Build & deploy",
+			keywords = "build release gradle assemble",
+			run = build_release,
 		},
 		{
-			label = "Device",
-			items = {
-				{ label = "Capture screen", action = capture_screen },
-				{ label = "Dump layout tree", action = dump_layout },
-			},
+			id = "clean",
+			label = "Clean project",
+			group = "Build & deploy",
+			keywords = "clean gradle build",
+			run = clean,
 		},
 		{
-			label = "Project",
-			items = {
-				{ label = "Describe project", action = describe_project },
-				{ label = "Show environment info", action = show_android_info },
-			},
+			id = "refresh_dependencies",
+			label = "Refresh dependencies",
+			group = "Build & deploy",
+			keywords = "refresh dependencies gradle cache",
+			run = refresh_dependencies,
+		},
+		{
+			id = "uninstall",
+			label = "Uninstall app",
+			group = "Build & deploy",
+			keywords = "uninstall remove adb app",
+			run = uninstall,
+		},
+		{
+			id = "start_emulator",
+			label = "Start emulator",
+			group = "Emulator",
+			keywords = "emulator avd start launch",
+			run = start_emulator_picker,
+		},
+		{
+			id = "stop_emulator",
+			label = "Stop emulator",
+			group = "Emulator",
+			keywords = "emulator avd stop",
+			run = stop_avd,
+		},
+		{
+			id = "open_studio_file",
+			label = "Open current file in Android Studio",
+			group = "Android Studio",
+			keywords = "studio open file ide",
+			run = open_in_android_studio,
+		},
+		{
+			id = "studio_check",
+			label = "Check Studio status",
+			group = "Android Studio",
+			keywords = "studio check status ide",
+			run = studio_check,
+		},
+		{
+			id = "capture_screen",
+			label = "Capture screen",
+			group = "Device",
+			keywords = "screen screenshot capture device",
+			run = capture_screen,
+		},
+		{
+			id = "dump_layout",
+			label = "Dump layout tree",
+			group = "Device",
+			keywords = "layout ui dump hierarchy device",
+			run = dump_layout,
+		},
+		{
+			id = "describe_project",
+			label = "Describe project",
+			group = "Project",
+			keywords = "describe project metadata gradle",
+			run = describe_project,
+		},
+		{
+			id = "show_info",
+			label = "Show environment info",
+			group = "Project",
+			keywords = "info sdk environment android",
+			run = show_android_info,
 		},
 	}
 end
 
 local function show_android_menu()
-	show_menu("Android", build_android_menu())
+	select_root_menu(get_actions())
 end
 
 local function refresh_dependencies()
