@@ -1,6 +1,8 @@
+
+
 ### Android Neovim plugin
 
-This plugin was created as an effort for me to able to work on multiple different language projects from a single terminal. There are options for working with xcode projects, flutter, web frontend and backend, and this project is here to expand that plugin ecosystem.
+This plugin was created to allow me to work on multiple different language projects from a single terminal. There are options for working with xcode projects, flutter, web frontend and backend, and this project is here to expand that plugin ecosystem.
 
 At the moment this plugin is under heavy development and only has features that I personally needed at the moment, but feel free to expand on it, experiment and break it. It is my first attempt at something like this, but I hope it can be useful.
 
